@@ -61,7 +61,7 @@
     font-size: 11px; color: var(--muted); border: 1px solid #30363d; padding: 2px 6px;
     border-radius: 6px; display: inline-block; margin-top: 6px;
   }
-  footer { padding: 10px 16px; border-top: 1px solid #21262d; color: var(--muted);
+  footer { padding: 10px 16px; border-top: 1px solid #21262d; color: #muted;
     display: flex; gap: 16px; align-items: center; flex-wrap: wrap; background: rgba(14,17,22,0.9); }
   .meter { width: 180px; height: 6px; background: #202938; border-radius: 6px; overflow: hidden; }
   .meter > div { height: 100%; background: var(--accent); width: 0%; transition: width 80ms linear; }
@@ -107,10 +107,11 @@
   .btn-ghost   { background: transparent; color: #c9d1d9; }
 </style>
 </head>
+
 <body>
 <div id="appWrap">
   <header>
-    <div class="status-badge" id="status">Mic: <span id="micState">off</span></div>
+    <div class="status-badge">Mic: <span id="micState">off</span></div>
     <div class="status-badge">Detected: <span id="detChord">—</span><span class="conf" id="detConf"></span></div>
     <div class="status-badge">Root: <span id="detRoot">—</span></div>
     <div class="controls">
@@ -119,9 +120,10 @@
       <button id="resetBtn">♻ Reset All</button>
       <select id="sensitivity">
         <option value="low">Sensitivity: Low</option>
-        <option value="med" selected>Sensitivity: Medium</option>
-        <option value="high">Sensitivity: High</option>
+        <option value="med">Sensitivity: Medium</option>
+        <option value="high" selected>Sensitivity: High</option>
       </select>
+      <button id="testBtn">⚡ Test Trigger</button>
     </div>
   </header>
 
@@ -129,29 +131,37 @@
 
   <footer>
     <div class="meter"><div id="levelBar"></div></div>
-    <div class="hint">Strum a clean chord. Mapped chords: <b>E, Am, A, G, Dm, D, F, C, Em</b>. — The question pops up big, background blurs; press <b>Esc</b>/<b>Space</b> when done.</div>
+    <div class="hint">Strum a clean chord. Cards pop when detected.</div>
   </footer>
 </div>
 
 <!-- Modal -->
-<div id="modal" class="modal" aria-hidden="true" role="dialog" aria-label="Selected Table Topic">
-  <div class="modal-card" role="document">
+<div id="modal" class="modal">
+  <div class="modal-card">
     <div class="modal-head">
-      <div class="modal-title" id="modalTitle">Table Topic</div>
-      <button class="btn-ghost" id="closeX" aria-label="Close">✕</button>
+      <div class="modal-title" id="modalTitle"></div>
+      <button class="btn-ghost" id="closeX">✕</button>
     </div>
-    <div class="modal-body" id="modalQuestion">Question goes here…</div>
+    <div class="modal-body" id="modalQuestion"></div>
     <div class="modal-actions">
-      <span class="hint" style="margin-right:auto">Press <b>Esc</b> / <b>Space</b> / <b>Enter</b> to close</span>
+      <span class="hint" style="margin-right:auto">Esc / Space / Enter to close</span>
       <button class="btn-primary" id="doneBtn">Done</button>
     </div>
   </div>
 </div>
 
 <script>
-// -------------------- CONFIG --------------------
-const COLUMNS = ['E', 'Am', 'A', 'G', 'Dm', 'D', 'F', 'C', 'Em'];
+/* ------------------  CONFIG  ------------------ */
 
+const COLUMNS = ['E','Am','A','G','Dm','D','F','C','Em'];
+
+const UI_CARDS_PER_COL = 10;
+const TRIGGER_COOLDOWN_MS = 900;
+const CONSISTENCY_WINDOWS = 2;
+const STRUM_HOLD_MS = 260;
+let   MIN_CONFIDENCE = 0.34;
+
+/* ------------------  QUESTION BANK  ------------------ */
 const questionBank = {
   'E': [
     "What’s an energizing song that boosts your mood—and why?",
@@ -260,338 +270,325 @@ const questionBank = {
     "What’s the best song to listen to alone?",
     "Which melody soothes your soul?",
     "What song would play during a personal transformation scene?"
-  ],
+  ]
 };
 
-const UI_CARDS_PER_COL = 10;         // show 10 cards per column
-const TRIGGER_COOLDOWN_MS = 1400;    // minimal time between triggers
-const CONSISTENCY_WINDOWS = 3;       // frames that must agree
-const STRUM_HOLD_MS = 180;           // stability window (ms)
-let MIN_CONFIDENCE = 0.42;           // adjusted by sensitivity
-
-// -------------------- BOARD RENDER --------------------
-const boardEl = document.getElementById('board');
-const appWrap = document.getElementById('appWrap');
+/* ------------------ BOARD RENDER ------------------ */
+const boardEl = document.getElementById("board");
+const appWrap = document.getElementById("appWrap");
 const columns = {};
+
 function renderBoard() {
-  boardEl.innerHTML = '';
+  boardEl.innerHTML = "";
   COLUMNS.forEach(name => {
-    const col = document.createElement('div');
-    col.className = 'col';
+    const col = document.createElement("div");
+    col.className = "col";
     col.dataset.key = name;
     col.innerHTML = `
       <h2>${name} <span class="pill">Songs & Table Topics</span></h2>
       <div class="cards"></div>
       <button class="manualBtn">Reveal next</button>
     `;
-    const cardsEl = col.querySelector('.cards');
-    const qList = (questionBank[name] || []);
+    const cardsEl = col.querySelector(".cards");
+    const list = questionBank[name];
     for (let i = 0; i < UI_CARDS_PER_COL; i++) {
-      const q = qList[i] || "Add more questions in code → questionBank";
-      const card = document.createElement('div');
-      card.className = 'card';
+      const q = list[i] || "Add more questions…";
+      const card = document.createElement("div");
+      card.className = "card";
       card.innerHTML = `
         <div class="cover">🎵</div>
         <div class="q">${q}</div>
         <span class="chip">#${i+1}</span>
       `;
-      // Allow reopening revealed questions
-      card.addEventListener('click', () => {
-        if (card.classList.contains('revealed')) openModal(q, name, i+1);
+      card.addEventListener("click", () => {
+        if (card.classList.contains("revealed"))
+          openModal(q, name, i + 1);
       });
       cardsEl.appendChild(card);
     }
-    col.querySelector('.manualBtn').onclick = () => revealNext(name);
+    col.querySelector(".manualBtn").onclick = () => revealNext(name);
     boardEl.appendChild(col);
     columns[name] = { el: col, nextIndex: 0 };
   });
 }
+
 renderBoard();
+
+/* ------------------ REVEAL + MODAL ------------------ */
 
 function revealNext(name) {
   const col = columns[name];
-  if (!col) return;
-  const cards = col.el.querySelectorAll('.card');
-  if (col.nextIndex >= cards.length) { flash(col.el, 'All cards revealed.'); return; }
-  const idx = col.nextIndex;
-  const card = cards[idx];
-  card.classList.add('revealed');
-  const qText = card.querySelector('.q').textContent || '';
-  openModal(qText, name, idx + 1);
+  const cards = col.el.querySelectorAll(".card");
+  if (col.nextIndex >= cards.length) return;
+  const card = cards[col.nextIndex];
+  card.classList.add("revealed");
+  const q = card.querySelector(".q").textContent;
+  openModal(q, name, col.nextIndex + 1);
   col.nextIndex++;
 }
 
-function resetAll() {
-  Object.values(columns).forEach(c => {
-    c.nextIndex = 0;
-    c.el.querySelectorAll('.card').forEach(card => card.classList.remove('revealed'));
-  });
-}
-
-function flash(el, msg) {
-  const b = document.createElement('div');
-  b.textContent = msg;
-  b.style.position = 'absolute';
-  b.style.right = '12px';
-  b.style.bottom = '12px';
-  b.style.padding = '6px 10px';
-  b.style.background = '#1f6feb';
-  b.style.color = 'white';
-  b.style.borderRadius = '8px';
-  b.style.fontSize = '12px';
-  el.style.position = 'relative';
-  el.appendChild(b);
-  setTimeout(() => b.remove(), 900);
-}
-
-// -------------------- MODAL LOGIC --------------------
-const modalEl = document.getElementById('modal');
-const modalTitleEl = document.getElementById('modalTitle');
-const modalQEl = document.getElementById('modalQuestion');
-const doneBtn = document.getElementById('doneBtn');
-const closeX = document.getElementById('closeX');
+const modal = document.getElementById("modal");
+const modalTitle = document.getElementById("modalTitle");
+const modalQuestion = document.getElementById("modalQuestion");
+const closeX = document.getElementById("closeX");
+const doneBtn = document.getElementById("doneBtn");
 
 let modalOpen = false;
 
-function openModal(qText, chordName, number) {
+function openModal(q, chord, num) {
   if (modalOpen) return;
   modalOpen = true;
-  modalTitleEl.textContent = `Chord: ${chordName} • Card #${number}`;
-  modalQEl.textContent = qText;
-  modalEl.classList.add('show');
-  modalEl.setAttribute('aria-hidden', 'false');
-  appWrap.classList.add('blurred');
-  doneBtn.focus({ preventScroll: true });
+  modalTitle.textContent = `Chord: ${chord} • Card #${num}`;
+  modalQuestion.textContent = q;
+  modal.classList.add("show");
+  appWrap.classList.add("blurred");
 }
 
 function closeModal() {
   modalOpen = false;
-  modalEl.classList.remove('show');
-  modalEl.setAttribute('aria-hidden', 'true');
-  appWrap.classList.remove('blurred');
+  modal.classList.remove("show");
+  appWrap.classList.remove("blurred");
 }
 
-doneBtn.addEventListener('click', closeModal);
-closeX.addEventListener('click', closeModal);
-// Click outside the card closes as well
-modalEl.addEventListener('click', (e) => {
-  if (e.target === modalEl) closeModal();
-});
-document.addEventListener('keydown', (e) => {
-  if (!modalOpen) return;
-  if (e.key === 'Escape' || e.key === ' ' || e.key === 'Enter') {
+closeX.onclick = closeModal;
+doneBtn.onclick = closeModal;
+
+modal.onclick = e => { if (e.target === modal) closeModal(); };
+
+document.addEventListener("keydown", e => {
+  if (modalOpen && (e.key === "Escape" || e.key === " " || e.key === "Enter")) {
     e.preventDefault();
     closeModal();
   }
 });
 
-// -------------------- AUDIO + CHORD DETECTION --------------------
-const detChordEl = document.getElementById('detChord');
-const detConfEl = document.getElementById('detConf');
-const detRootEl = document.getElementById('detRoot');
-const levelBar = document.getElementById('levelBar');
+/* ------------------ KEYBOARD TRIGGERS ------------------ */
+
+document.addEventListener("keydown", e => {
+  if (modalOpen) return;
+  const k = e.key.toUpperCase();
+  if (k === "E") revealNext("E");
+  if (k === "A") revealNext("A");
+  if (k === "G") revealNext("G");
+  if (k === "D") revealNext("D");
+  if (k === "F") revealNext("F");
+  if (k === "C") revealNext("C");
+  if (k === "M") revealNext("Am");
+  if (k === "N") revealNext("Dm");
+  if (k === "R") revealNext("Em");
+});
+
+/* ------------------ AUDIO + DETECTION ------------------ */
+
+const detChordEl = document.getElementById("detChord");
+const detConfEl  = document.getElementById("detConf");
+const detRootEl  = document.getElementById("detRoot");
+const levelBar   = document.getElementById("levelBar");
+
+let audioCtx, analyser, dataArray, micStream;
+let rafId;
+let lastTriggerAt = 0;
+let stableQueue = [];
+let currentSensitivity = "high";
 
 const A4 = 440;
 function freqToMidi(f) { return Math.round(12 * Math.log2(f / A4) + 69); }
-function midiToPc(m) { return (m % 12 + 12) % 12; }
+function midiToPc(m)   { return (m % 12 + 12) % 12; }
 const PC_NAMES = ['C','C#','D','Eb','E','F','F#','G','Ab','A','Bb','B'];
 
 function detectChordFromSpectrum(freqData, sampleRate, fftSize) {
-  // 1) Loudness estimate
   let sum = 0;
   for (let i = 0; i < freqData.length; i++) sum += freqData[i];
-  const avg = sum / freqData.length;
-  const loudness = avg / 255; // 0..1
+  const loudness = sum / freqData.length / 255;
 
-  // 2) Peak picking
   const peaks = [];
   const binHz = sampleRate / fftSize;
+
   for (let i = 3; i < freqData.length - 3; i++) {
     const v = freqData[i];
-    if (v > freqData[i-1] && v > freqData[i+1] && v > 40) {
-      const freq = i * binHz;
-      if (freq > 70 && freq < 1500) peaks.push({ i, v, f: freq });
+    if (v > freqData[i-1] && v > freqData[i+1] && v > 28) {
+      const f = i * binHz;
+      if (f > 80 && f < 2000) peaks.push({ f, v });
     }
   }
-  peaks.sort((a,b) => b.v - a.v);
-  const top = peaks.slice(0, 7);
 
-  // 3) Pitch classes
+  peaks.sort((a,b) => b.v - a.v);
+  const top = peaks.slice(0,7);
+
   const pcs = new Array(12).fill(0);
   top.forEach(p => {
     const midi = freqToMidi(p.f);
-    const pc = midiToPc(midi);
-    pcs[pc] += p.v;
+    pcs[midiToPc(midi)] += p.v;
   });
 
-  // 4) Triad template matching (major/minor)
   const templates = [];
-  for (let r = 0; r < 12; r++) {
+  for (let r=0; r<12; r++) {
     const major = [r, (r+4)%12, (r+7)%12];
     const minor = [r, (r+3)%12, (r+7)%12];
-    const scoreMaj = major.reduce((s, p) => s + pcs[p], 0);
-    const scoreMin = minor.reduce((s, p) => s + pcs[p], 0);
+    const sumMaj = major.reduce((s,p)=>s+pcs[p],0);
+    const sumMin = minor.reduce((s,p)=>s+pcs[p],0);
     const total = pcs.reduce((a,b)=>a+b,0) || 1;
     templates.push(
-      { name: PC_NAMES[r],     score: scoreMaj/total, root: PC_NAMES[r], type: 'major' },
-      { name: PC_NAMES[r]+'m', score: scoreMin/total, root: PC_NAMES[r], type: 'minor' }
+      { name: PC_NAMES[r], score: sumMaj/total, root: PC_NAMES[r], type:'M' },
+      { name: PC_NAMES[r]+'m', score: sumMin/total, root: PC_NAMES[r], type:'m' }
     );
   }
-  templates.sort((a,b) => b.score - a.score);
+
+  templates.sort((a,b)=>b.score-a.score);
   const best = templates[0];
   return { chord: best.name, confidence: best.score, root: best.root, loudness };
 }
 
-let audioCtx, analyser, source, dataArray, rafId;
-let lastTriggerAt = 0;
-let stableQueue = [];
-let currentSensitivity = 'med';
-let micStream; // keep to stop safely
+/* ------------------ START/STOP MIC ------------------ */
 
-// -------------------- TOAST (error/status popups) --------------------
-function toast(msg, kind='info') {
-  const t = document.createElement('div');
-  t.textContent = msg;
-  t.style.position = 'fixed';
-  t.style.left = '50%';
-  t.style.top = '16px';
-  t.style.transform = 'translateX(-50%)';
-  t.style.background = kind==='error' ? '#b42318' : '#1f6feb';
-  t.style.color = '#fff';
-  t.style.padding = '8px 12px';
-  t.style.borderRadius = '8px';
-  t.style.zIndex = '2000';
-  t.style.boxShadow = '0 8px 24px rgba(0,0,0,.3)';
-  document.body.appendChild(t);
-  setTimeout(()=>t.remove(), 3200);
-}
+const startBtn = document.getElementById("startBtn");
+const stopBtn  = document.getElementById("stopBtn");
+const resetBtn = document.getElementById("resetBtn");
+const sensSel  = document.getElementById("sensitivity");
+const testBtn  = document.getElementById("testBtn");
+const micState = document.getElementById("micState");
 
-// -------------------- MIC START/STOP (patched) --------------------
-const micStateEl = document.getElementById('micState');
-const startBtn = document.getElementById('startBtn');
-const stopBtn  = document.getElementById('stopBtn');
-const resetBtn = document.getElementById('resetBtn');
-const sensSel  = document.getElementById('sensitivity');
+testBtn.onclick = ()=> revealNext("E");
+
+sensSel.onchange = e => {
+  currentSensitivity = e.target.value;
+  MIN_CONFIDENCE = currentSensitivity === "high" ? 0.34 :
+                   currentSensitivity === "med"  ? 0.40 :
+                                                    0.46;
+};
 
 async function startAudio() {
   try {
-    // IMPORTANT: works only on https or http://localhost (not file://)
     micStream = await navigator.mediaDevices.getUserMedia({
-      audio: { echoCancellation: false, noiseSuppression: false }
+      audio: { echoCancellation:false, noiseSuppression:false }
     });
+
     audioCtx = new (window.AudioContext || window.webkitAudioContext)();
     analyser = audioCtx.createAnalyser();
     analyser.fftSize = 4096;
-    analyser.smoothingTimeConstant = 0.8;
-    source = audioCtx.createMediaStreamSource(micStream);
-    source.connect(analyser);
-    dataArray = new Uint8Array(analyser.frequencyBinCount);
-    micStateEl.textContent = 'on';
-    toast('Microphone started ✅');
-    loop();
-  } catch (err) {
-    console.error('Mic error:', err);
-    micStateEl.textContent = 'off';
-    startBtn.disabled = false;   // let user retry
-    stopBtn.disabled = true;
+    analyser.smoothingTimeConstant = 0.55;
 
-    if (location.protocol === 'file:') {
-      toast('Open via http://localhost (not file://). Run: python -m http.server 8000', 'error');
-    } else if (err && (err.name === 'NotAllowedError' || err.name === 'SecurityError')) {
-      toast('Mic permission blocked. Click the lock icon → Site settings → Microphone → Allow.', 'error');
-    } else if (err && err.name === 'NotFoundError') {
-      toast('No microphone found / selected. Check OS input device.', 'error');
-    } else {
-      toast('Could not start microphone. See console (F12) for details.', 'error');
-    }
+    const src = audioCtx.createMediaStreamSource(micStream);
+
+    const hp = audioCtx.createBiquadFilter();
+    hp.type = "highpass";
+    hp.frequency.value = 120;
+
+    const lp = audioCtx.createBiquadFilter();
+    lp.type = "lowpass";
+    lp.frequency.value = 2500;
+
+    src.connect(hp);
+    hp.connect(lp);
+    lp.connect(analyser);
+
+    dataArray = new Uint8Array(analyser.frequencyBinCount);
+
+    micState.textContent = "on";
+    loop();
+
+  } catch(e) {
+    micState.textContent = "off";
   }
 }
 
 function stopAudio() {
-  try {
-    if (micStream) micStream.getTracks().forEach(t => t.stop());
-    if (audioCtx && audioCtx.state !== 'closed') audioCtx.close();
-  } catch {}
+  try { micStream.getTracks().forEach(t=>t.stop()); } catch{}
+  try { audioCtx.close(); } catch{}
+
   cancelAnimationFrame(rafId);
-  micStateEl.textContent = 'off';
-  toast('Microphone stopped ⏹️');
+  micState.textContent = "off";
 }
 
-// Button wiring with safe state handling
-startBtn.onclick = async () => {
+startBtn.onclick = async ()=>{
   startBtn.disabled = true;
-  stopBtn.disabled = true;
+  stopBtn.disabled  = true;
   await startAudio();
-  if (micStateEl.textContent === 'on') {
-    stopBtn.disabled = false;
-  } else {
-    // start failed; re-enable Start
-    startBtn.disabled = false;
-  }
+  if (micState.textContent === "on") stopBtn.disabled = false;
+  else startBtn.disabled = false;
 };
-stopBtn.onclick  = () => {
+
+stopBtn.onclick = ()=>{
   stopAudio();
   startBtn.disabled = false;
-  stopBtn.disabled = true;
-};
-resetBtn.onclick = resetAll;
-sensSel.onchange = (e) => {
-  const v = e.target.value;
-  currentSensitivity = v;
-  MIN_CONFIDENCE = v === 'high' ? 0.36 : v === 'med' ? 0.42 : 0.48;
+  stopBtn.disabled  = true;
 };
 
-// Warn if opened as file://
-window.addEventListener('load', () => {
-  if (location.protocol === 'file:') {
-    toast('Open via http://localhost:8000 (not file://). Mic needs a secure context.', 'error');
-  }
-});
+resetBtn.onclick = ()=>{
+  Object.values(columns).forEach(c=>{
+    c.nextIndex = 0;
+    c.el.querySelectorAll(".card").forEach(card=>card.classList.remove("revealed"));
+  });
+};
 
-// -------------------- MAIN LOOP --------------------
+/* ------------------ LOOP ------------------ */
+
 function loop() {
   analyser.getByteFrequencyData(dataArray);
-  const { chord, confidence, root, loudness } = detectChordFromSpectrum(
-    dataArray, audioCtx.sampleRate, analyser.fftSize
-  );
-  levelBar.style.width = (loudness * 100).toFixed(1) + '%';
+  const { chord, confidence, root, loudness } =
+    detectChordFromSpectrum(dataArray, audioCtx.sampleRate, analyser.fftSize);
+
   detChordEl.textContent = chord;
-  detConfEl.textContent = ` (conf ${confidence.toFixed(2)})`;
-  detRootEl.textContent = root;
+  detConfEl.textContent = ` (conf ${confidence.toFixed(2)}, loud ${loudness.toFixed(2)})`;
+  detRootEl.textContent  = root;
+  levelBar.style.width   = (loudness * 100).toFixed(1) + "%";
 
   const now = performance.now();
-  const loudEnough = loudness > (currentSensitivity === 'high' ? 0.05 : currentSensitivity === 'med' ? 0.08 : 0.12);
-  const confident = confidence >= MIN_CONFIDENCE;
+  const loudEnough =
+      currentSensitivity==="high" ? loudness > 0.030 :
+      currentSensitivity==="med"  ? loudness > 0.055 :
+                                    loudness > 0.090;
 
-  if (!modalOpen && loudEnough && confident) {
-    stableQueue.push({ chord, t: now });
-    while (stableQueue.length && now - stableQueue[0].t > STRUM_HOLD_MS) stableQueue.shift();
-    const agree = stableQueue.filter(x => x.chord === chord).length;
+  if (!modalOpen && loudEnough && confidence >= MIN_CONFIDENCE) {
+    stableQueue.push({ chord, t:now });
+    while (stableQueue.length &&
+           now - stableQueue[0].t > STRUM_HOLD_MS)
+      stableQueue.shift();
+
+    const agree = stableQueue.filter(x=>x.chord===chord).length;
     if (agree >= CONSISTENCY_WINDOWS) {
       maybeTrigger(chord, now);
-      stableQueue.length = 0;
+      stableQueue = [];
     }
-  } else {
-    // decay
-    stableQueue.length = Math.max(0, stableQueue.length - 1);
   }
 
   rafId = requestAnimationFrame(loop);
 }
 
+/* ------------------ MAPPING ------------------ */
+
 function maybeTrigger(chord, now) {
-  if (modalOpen) return; // pause triggers while modal open
+  if (modalOpen) return;
   if (now - lastTriggerAt < TRIGGER_COOLDOWN_MS) return;
   lastTriggerAt = now;
 
-  if (columns[chord]) {
-    revealNext(chord);
-  } else {
-    const root = chord.replace('m','');
-    if (columns[root+'m']) revealNext(root+'m');
-    else if (columns[root]) revealNext(root);
-  }
+  if (columns[chord]) return revealNext(chord);
+
+  const root = chord.replace("m","");
+  if (columns[root+"m"]) return revealNext(root+"m");
+  if (columns[root])     return revealNext(root);
+
+  const targets = ['E','Am','A','G','Dm','D','F','C','Em'];
+  const TO_PC = {C:0,'C#':1,D:2,Eb:3,E:4,F:5,'F#':6,G:7,Ab:8,A:9,Bb:10,B:11};
+
+  const isMinor = chord.endsWith("m");
+  const name = isMinor ? chord.slice(0,-1) : chord;
+  const pc = TO_PC[name];
+  if (pc == null) return;
+
+  const best = targets
+    .map(t=>{
+      const tMinor = t.endsWith("m");
+      const tName = tMinor ? t.slice(0,-1) : t;
+      const tPc = TO_PC[tName];
+      const dist = Math.min((pc-tPc+12)%12, (tPc-pc+12)%12);
+      return {t,dist,typeMatch:(tMinor===isMinor)};
+    })
+    .sort((a,b)=>(a.dist-b.dist) || (b.typeMatch-a.typeMatch))[0];
+
+  if (best) revealNext(best.t);
 }
+
 </script>
 </body>
 </html>
