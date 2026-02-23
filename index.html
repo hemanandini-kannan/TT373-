@@ -122,6 +122,7 @@
         <option value="low">Sensitivity: Low</option>
         <option value="med">Sensitivity: Medium</option>
         <option value="high" selected>Sensitivity: High</option>
+        <option value="ultra">Sensitivity: Ultra</option> <!-- ★ added -->
       </select>
       <button id="testBtn">⚡ Test Trigger</button>
     </div>
@@ -391,6 +392,15 @@ let lastTriggerAt = 0;
 let stableQueue = [];
 let currentSensitivity = "high";
 
+/* ★ Ultra sensitivity + strum-latch additions */
+const ULTRA_LOUD_GATE   = 0.018;  // lower loudness gate (more sensitive than High)
+const ULTRA_CONFIDENCE  = 0.30;   // slightly lower chord confidence for Ultra
+const LATCH_MS          = 360;    // accept short strum bursts (~0.36s)
+const RISE_DELTA        = 0.012;  // loudness rise needed to arm latch
+let armedUntil = 0;               // latch window end time
+let prevLoud   = 0;               // previous loudness for rising-edge calc
+/* ★ end additions */
+
 const A4 = 440;
 function freqToMidi(f) { return Math.round(12 * Math.log2(f / A4) + 69); }
 function midiToPc(m)   { return (m % 12 + 12) % 12; }
@@ -452,15 +462,17 @@ testBtn.onclick = ()=> revealNext("E");
 
 sensSel.onchange = e => {
   currentSensitivity = e.target.value;
-  MIN_CONFIDENCE = currentSensitivity === "high" ? 0.34 :
-                   currentSensitivity === "med"  ? 0.40 :
-                                                    0.46;
+  MIN_CONFIDENCE = currentSensitivity === "ultra" ? ULTRA_CONFIDENCE :
+                   currentSensitivity === "high"  ? 0.34 :
+                   currentSensitivity === "med"   ? 0.40 :
+                                                     0.46;
 };
 
 async function startAudio() {
   try {
     micStream = await navigator.mediaDevices.getUserMedia({
-      audio: { echoCancellation:false, noiseSuppression:false }
+      // ★ include autoGainControl to avoid flattening guitar attacks
+      audio: { echoCancellation:false, noiseSuppression:false, autoGainControl:false }
     });
 
     audioCtx = new (window.AudioContext || window.webkitAudioContext)();
@@ -533,13 +545,22 @@ function loop() {
   detRootEl.textContent  = root;
   levelBar.style.width   = (loudness * 100).toFixed(1) + "%";
 
-  const now = performance.now();
-  const loudEnough =
-      currentSensitivity==="high" ? loudness > 0.030 :
-      currentSensitivity==="med"  ? loudness > 0.055 :
-                                    loudness > 0.090;
+  // ★ gate per sensitivity (adds Ultra)
+  const loudGate = currentSensitivity==="ultra" ? ULTRA_LOUD_GATE :
+                   currentSensitivity==="high"  ? 0.030 :
+                   currentSensitivity==="med"   ? 0.055 : 0.090;
+  const loudEnough = loudness > loudGate;
 
-  if (!modalOpen && loudEnough && confidence >= MIN_CONFIDENCE) {
+  // ★ strum latch: catch short, non-continuous guitar attacks
+  const rising = loudness > (prevLoud + RISE_DELTA);
+  if (rising && loudness > ULTRA_LOUD_GATE) {
+    armedUntil = performance.now() + LATCH_MS;   // open a short acceptance window
+  }
+  const armed = performance.now() <= armedUntil;
+
+  const now = performance.now();
+
+  if (!modalOpen && (loudEnough || armed) && confidence >= MIN_CONFIDENCE) {
     stableQueue.push({ chord, t:now });
     while (stableQueue.length &&
            now - stableQueue[0].t > STRUM_HOLD_MS)
@@ -549,9 +570,11 @@ function loop() {
     if (agree >= CONSISTENCY_WINDOWS) {
       maybeTrigger(chord, now);
       stableQueue = [];
+      armedUntil = 0; // close latch after a successful trigger
     }
   }
 
+  prevLoud = loudness; // ★ keep for rising-edge detection
   rafId = requestAnimationFrame(loop);
 }
 
