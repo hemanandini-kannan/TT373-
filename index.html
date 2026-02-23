@@ -29,7 +29,7 @@
   }
   .conf { color: var(--muted); margin-left: 4px; font-weight: 500; }
   .controls { margin-left: auto; display: flex; gap: 8px; flex-wrap: wrap; }
-  button {
+  button, select {
     background: var(--card); color: var(--text); border: 1px solid #30363d;
     padding: 8px 12px; border-radius: 8px; cursor: pointer; font-weight: 600;
   }
@@ -66,7 +66,7 @@
     display: flex; gap: 16px; align-items: center; flex-wrap: wrap; background: rgba(14,17,22,0.9); }
   .meter { width: 180px; height: 6px; background: #202938; border-radius: 6px; overflow: hidden; }
   .meter > div { height: 100%; background: var(--accent); width: 0%; transition: width 80ms linear; }
-  .hint { color: #8b949e; font-size: 13px; }
+  .hint { color: var(--muted); font-size: 13px; }
 
   .blurred { filter: blur(6px); transition: filter 140ms ease; pointer-events: none; user-select: none; }
 
@@ -84,7 +84,10 @@
     box-shadow: 0 12px 40px rgba(0,0,0,0.6);
     padding: 22px 24px;
   }
-  .modal-head { display: flex; align-items: center; justify-content: space-between; gap: 10px; margin-bottom: 12px; }
+  .modal-head {
+    display: flex; align-items: center; justify-content: space-between; gap: 10px;
+    margin-bottom: 12px;
+  }
   .modal-title { font-weight: 700; letter-spacing: .3px; color: #c9d1d9; font-size: 14px; }
   .modal-body  { color: #e6edf3; font-weight: 700; line-height: 1.25; font-size: clamp(22px, 3.6vw, 40px); white-space: pre-wrap; }
   .modal-actions { margin-top: 16px; display: flex; gap: 10px; flex-wrap: wrap; justify-content: flex-end; }
@@ -130,7 +133,9 @@
 </div>
 
 <script>
-/* ---------------- SONG-THEMED QUESTION BANK ---------------- */
+/* ---------------- SIMPLE, STABLE, GUITAR-FRIENDLY CHORD DETECTOR ---------------- */
+
+/* 1) FULL QUESTION BANK */
 const questionBank = {
   'E': [
     "What’s an energizing song that boosts your mood—and why?",
@@ -172,7 +177,7 @@ const questionBank = {
     "Which happy song never fails to make you smile?",
     "What’s the most fun song you’ve danced to?",
     "What’s your go‑to song for celebrations?",
-    "Share a song that reminds you of friendship.",
+    "Share a song that reminds you of friendship?",
     "What song sums up your happiest memory?",
     "If joy were a song, how would it sound?",
     "Which song instantly puts you in a good mood?",
@@ -242,8 +247,23 @@ const questionBank = {
   ],
 };
 
-/* ---------------- BOARD ---------------- */
+/* 2) COLUMNS ON BOARD */
 const COLUMNS = ['E','Am','A','G','Dm','D','F','C','Em'];
+
+/* 3) SIMPLE FREQUENCY BANDS FOR GUITAR (dominant frequency mapping) */
+const CHORD_MAP = {
+  E:  {min: 70, max: 95},
+  A:  {min: 95, max: 125},
+  D:  {min:125, max:155},
+  G:  {min: 75, max:115},
+  C:  {min:100, max:135},
+  F:  {min: 85, max:120},
+  Am: {min: 95, max:125},
+  Dm: {min:125, max:155},
+  Em: {min: 75, max:95}
+};
+
+/* ---- UI refs ---- */
 const detChordEl = document.getElementById("detChord");
 const detConfEl  = document.getElementById("detConf");
 const detRootEl  = document.getElementById("detRoot");
@@ -258,8 +278,27 @@ const modalTitle = document.getElementById("modalTitle");
 const modalQ     = document.getElementById("modalQuestion");
 const closeX     = document.getElementById("closeX");
 const doneBtn    = document.getElementById("doneBtn");
-const micStateEl = document.getElementById("micState");
 
+/* ---- State ---- */
+let audioCtx, analyser, dataArray, micStream;
+let rafId;
+let modalOpen = false;
+let micOn = false;
+
+/* ★ Ultra sensitivity & strum handling (add) */
+const LEVEL_GATE = 0.08;       // lower than "high" → more sensitive
+const ARM_GATE = 0.06;         // arm latch on small spike
+const STRUM_LATCH_MS = 380;    // accept triggers for this long after attack
+const COOLDOWN_MS = 1200;      // avoid double fires from one strum
+const STABILITY_FRAMES = 2;    // require same chord for N frames
+
+let lastTriggerAt = 0;         // cooldown timer
+let armedUntil = 0;            // latch window end time (ms)
+let lastChord = null;          // stability tracking
+let stableCount = 0;
+let prevLevel = 0;
+
+/* ---- Board render ---- */
 const columns = {};
 function renderBoard() {
   boardEl.innerHTML = "";
@@ -298,8 +337,7 @@ function renderBoard() {
 }
 renderBoard();
 
-/* ---------------- MODAL ---------------- */
-let modalOpen = false;
+/* ---- Modal ---- */
 function openModal(q, chord, num){
   if (modalOpen) return;
   modalOpen = true;
@@ -320,7 +358,7 @@ document.addEventListener("keydown", e=>{
   if (modalOpen && (e.key==="Escape"||e.key===" "||e.key==="Enter")) { e.preventDefault(); closeModal(); }
 });
 
-/* ---------------- REVEAL ---------------- */
+/* ---- Reveal ---- */
 function revealNext(name){
   const col = columns[name];
   const cards = col.el.querySelectorAll(".card");
@@ -331,206 +369,107 @@ function revealNext(name){
   openModal(q, name, col.nextIndex+1);
   col.nextIndex++;
 }
-resetBtn.onclick = ()=>{
-  Object.values(columns).forEach(c=>{
-    c.nextIndex = 0;
-    c.el.querySelectorAll(".card").forEach(card=>card.classList.remove("revealed"));
-  });
-};
 
-/* ---------------- AUDIO (mic) ---------------- */
-let audioCtx, analyser, dataArray, micStream, rafId;
-let lastTriggerAt = 0;
-let stableQueue = [];
-const STRUM_HOLD_MS = 180;
-const CONSISTENCY_WINDOWS = 3;
-const TRIGGER_COOLDOWN_MS = 1400;
-let MIN_CONFIDENCE = 0.42;
-
-function toast(msg, kind='info') {
-  const t = document.createElement('div');
-  t.textContent = msg;
-  t.style.position = 'fixed';
-  t.style.left = '50%';
-  t.style.top = '16px';
-  t.style.transform = 'translateX(-50%)';
-  t.style.background = kind==='error' ? '#b42318' : '#1f6feb';
-  t.style.color = '#fff';
-  t.style.padding = '8px 12px';
-  t.style.borderRadius = '8px';
-  t.style.zIndex = '2000';
-  t.style.boxShadow = '0 8px 24px rgba(0,0,0,.3)';
-  document.body.appendChild(t);
-  setTimeout(()=>t.remove(), 3200);
-}
-
+/* ---- Audio start/stop ---- */
 async function startAudio(){
   try {
-    // IMPORTANT: disable browser DSP that kills guitar harmonics
-    micStream = await navigator.mediaDevices.getUserMedia({
-      audio: {
-        echoCancellation: false,
-        noiseSuppression: false,
-        autoGainControl: false,
-        channelCount: 1
-      }
-    });
+    micStream = await navigator.mediaDevices.getUserMedia({audio:true});
     audioCtx = new (window.AudioContext||window.webkitAudioContext)();
     analyser = audioCtx.createAnalyser();
-    analyser.fftSize = 8192;                 // finer resolution for chord partials
-    analyser.smoothingTimeConstant = 0.8;
+    analyser.fftSize = 4096; // ★ was 2048 → better resolution for strums
     const src = audioCtx.createMediaStreamSource(micStream);
     src.connect(analyser);
     dataArray = new Uint8Array(analyser.frequencyBinCount);
-    micStateEl.textContent = 'on';
-    toast('Microphone started ✅');
+    micOn = true;
+    document.getElementById('micState').textContent = 'on';
     loop();
   } catch (e){
     console.error(e);
-    micStateEl.textContent = 'off';
-    startBtn.disabled = false;
-    stopBtn.disabled = true;
-    if (location.protocol === 'file:') {
-      toast('Open via https or http://localhost (not file://)', 'error');
-    } else if (e && (e.name === 'NotAllowedError' || e.name === 'SecurityError')) {
-      toast('Mic permission blocked. Click lock icon → Site settings → Microphone → Allow.', 'error');
-    } else {
-      toast('Could not start microphone. See Console (F12).', 'error');
-    }
   }
 }
 function stopAudio(){
-  try { if (micStream) micStream.getTracks().forEach(t=>t.stop()); } catch {}
-  try { if (audioCtx && audioCtx.state !== 'closed') audioCtx.close(); } catch {}
+  try { micStream.getTracks().forEach(t=>t.stop()); } catch {}
+  try { audioCtx.close(); } catch {}
   cancelAnimationFrame(rafId);
-  micStateEl.textContent = 'off';
-  toast('Microphone stopped ⏹️');
+  micOn = false;
+  document.getElementById('micState').textContent = 'off';
 }
 
-/* ---------------- GUITAR-FRIENDLY CHORD DETECTION ----------------
-   Build a pitch-class histogram (chroma) from the spectrum and match
-   against major/minor triad templates: {root, +3/+4, +7}
-------------------------------------------------------------------- */
-const A4 = 440;
-function freqToMidi(f) { return Math.round(12 * Math.log2(f / A4) + 69); }
-function midiToPc(m)   { return (m % 12 + 12) % 12; }
-const PC_NAMES = ['C','C#','D','Eb','E','F','F#','G','Ab','A','Bb','B'];
-
-function detectChordFromSpectrum(freqData, sampleRate, fftSize) {
-  // Loudness for gating
-  let sum = 0;
-  for (let i = 0; i < freqData.length; i++) sum += freqData[i];
-  const avg = sum / freqData.length;
-  const loudness = avg / 255; // 0..1
-
-  // Peak picking
-  const peaks = [];
-  const binHz = sampleRate / fftSize;
-  for (let i = 3; i < freqData.length - 3; i++) {
-    const v = freqData[i];
-    if (v > freqData[i-1] && v > freqData[i+1] && v > 40) {
-      const freq = i * binHz;
-      if (freq > 70 && freq < 1800) peaks.push({ i, v, f: freq });
-    }
-  }
-  peaks.sort((a,b) => b.v - a.v);
-  const top = peaks.slice(0, 10); // use top peaks
-
-  // Pitch classes (chroma)
-  const pcs = new Array(12).fill(0);
-  top.forEach(p => {
-    const midi = freqToMidi(p.f);
-    const pc = midiToPc(midi);
-    pcs[pc] += p.v; // weight by magnitude
-  });
-
-  // Template matching for all roots (major/minor)
-  const candidates = [];
-  const total = pcs.reduce((a,b)=>a+b,0) || 1;
-  for (let r = 0; r < 12; r++) {
-    const maj = [r, (r+4)%12, (r+7)%12];
-    const min = [r, (r+3)%12, (r+7)%12];
-    const sMaj = maj.reduce((s,p)=>s+pcs[p],0) / total;
-    const sMin = min.reduce((s,p)=>s+pcs[p],0) / total;
-    candidates.push(
-      { name: PC_NAMES[r],   type: 'major', score: sMaj, root: PC_NAMES[r] },
-      { name: PC_NAMES[r]+'m', type: 'minor', score: sMin, root: PC_NAMES[r] }
-    );
-  }
-  candidates.sort((a,b)=>b.score - a.score);
-  const best = candidates[0];
-  return { chord: best.name, confidence: best.score, root: best.root, loudness };
-}
-
-/* ---------------- LOOP ---------------- */
-function loop(){
+/* ---- Dominant frequency + mapping ---- */
+function getDominantFreq(){
   analyser.getByteFrequencyData(dataArray);
-  const { chord, confidence, root, loudness } = detectChordFromSpectrum(
-    dataArray, audioCtx.sampleRate, analyser.fftSize
-  );
+  let maxVal=0, maxIdx=0;
+  for (let i=0;i<dataArray.length;i++){
+    const v = dataArray[i];
+    if (v>maxVal){ maxVal = v; maxIdx = i; }
+  }
+  const freq = maxIdx * (audioCtx.sampleRate / analyser.fftSize);
+  return { freq, level: maxVal/255 };
+}
+function detectChord(freq){
+  for (const c in CHORD_MAP){
+    const {min,max} = CHORD_MAP[c];
+    if (freq >= min && freq <= max) return c;
+  }
+  return null;
+}
 
-  levelBar.style.width = (loudness * 100).toFixed(0) + "%";
-  detChordEl.textContent = chord || "—";
-  detConfEl.textContent  = chord ? ` (conf ${confidence.toFixed(2)})` : '';
-  detRootEl.textContent  = root || "—";
+/* ---- Main loop ---- */
+function loop(){
+  if (!audioCtx) return;
 
+  const {freq, level} = getDominantFreq();
+  levelBar.style.width = (level*100).toFixed(0) + "%";
+  detConfEl.textContent = `freq ${freq.toFixed(1)} Hz`;
+  detRootEl.textContent = "";
+
+  const chord = detectChord(freq);
+
+  // ★ Stability across frames
+  if (chord === lastChord) stableCount++;
+  else { lastChord = chord; stableCount = 1; }
+
+  // ★ Attack+hold latch for strums (capture short, non-continuous events)
   const now = performance.now();
-  const loudEnough = loudness > 0.08;        // try 0.05–0.12 if needed
-  const confident  = confidence >= MIN_CONFIDENCE;
+  const rising = level > (prevLevel + 0.015);         // detect quick rise
+  if (level > ARM_GATE && rising) {
+    armedUntil = now + STRUM_LATCH_MS;                // open latch window
+  }
+  const armed = now <= armedUntil;
+  const overGate = level > LEVEL_GATE;
+  const stable = chord && stableCount >= STABILITY_FRAMES;
+  const cooled = (now - lastTriggerAt) > COOLDOWN_MS;
 
-  if (!modalOpen && loudEnough && confident) {
-    stableQueue.push({ chord, t: now });
-    while (stableQueue.length && now - stableQueue[0].t > STRUM_HOLD_MS) stableQueue.shift();
-    const agree = stableQueue.filter(x => x.chord === chord).length;
-    if (agree >= CONSISTENCY_WINDOWS && now - lastTriggerAt > TRIGGER_COOLDOWN_MS) {
-      lastTriggerAt = now;
-      triggerChord(chord);
-      stableQueue.length = 0;
-    }
+  if (!modalOpen && stable && (overGate || armed) && cooled){
+    detChordEl.textContent = chord;
+    revealNext(chord);
+    lastTriggerAt = now;
+    armedUntil = 0; // close latch after firing
   } else {
-    stableQueue.length = Math.max(0, stableQueue.length - 1);
+    detChordEl.textContent = chord || "—";
   }
 
+  prevLevel = level;  // ★ keep for rising-edge calc
   rafId = requestAnimationFrame(loop);
 }
 
-function triggerChord(chord) {
-  // exact match column?
-  if (columns[chord]) {
-    revealNext(chord);
-    return;
-  }
-  // fallback: root mapping (G vs Gm)
-  const root = chord.replace('m','');
-  if (columns[root+'m']) revealNext(root+'m');
-  else if (columns[root]) revealNext(root);
-}
-
-/* ---------------- BUTTONS ---------------- */
+/* ---- Buttons ---- */
 startBtn.onclick = async ()=>{
   startBtn.disabled = true;
-  stopBtn.disabled = true;
   await startAudio();
-  if (micStateEl.textContent === 'on') stopBtn.disabled = false;
-  else startBtn.disabled = false;
+  stopBtn.disabled = false;
 };
 stopBtn.onclick = ()=>{
   stopAudio();
   startBtn.disabled = false;
   stopBtn.disabled = true;
 };
-
-// Warn if opened as file:// (mic blocked)
-window.addEventListener('load', ()=>{
-  if (location.protocol === 'file:') {
-    const p = document.createElement('div');
-    p.textContent = 'Open via https or http://localhost (not file://) for microphone access.';
-    p.style.position='fixed'; p.style.bottom='12px'; p.style.left='12px';
-    p.style.background='#b42318'; p.style.color='#fff'; p.style.padding='8px 10px';
-    p.style.borderRadius='6px'; p.style.zIndex='2000';
-    document.body.appendChild(p);
-  }
-});
+resetBtn.onclick = ()=>{
+  Object.values(columns).forEach(c=>{
+    c.nextIndex = 0;
+    c.el.querySelectorAll(".card").forEach(card=>card.classList.remove("revealed"));
+  });
+};
 </script>
 </body>
 </html>
